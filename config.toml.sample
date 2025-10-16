@@ -1,0 +1,40 @@
+# 下载图片时的并发限制，0为无限制
+download_concurrent_limit = 8
+# 同时处理的章节任务数量，0为无限制
+task_concurrent_limit = 2
+
+# 你的漫画订阅关键词列表。
+# 程序将使用这些关键词进行搜索。
+# 请尽量使用完整且准确的官方标题。
+subscriptions = [
+    "三咲くんは攻略キャラじゃない", # <-- 使用关键词
+]
+
+# cookie (可选, 当前网站不需要)
+# cookie = ""
+
+# 输出配置 (本地存储)
+[output]
+type = "local"
+path = "./downloads"
+
+# 输出配置 (S3/OSS 存储示例, 需要启用 oss feature)
+# [output]
+# type = "s3"
+# endpoint = "https://s3.your-region.amazonaws.com"
+# bucket = "your-bucket-name"
+# region = "your-region"
+# access_key_id = "YOUR_ACCESS_KEY"
+# secret_access_key = "YOUR_SECRET_KEY"
+# base_path = "kuragebunch"
+
+# 图片输出格式配置 (可选, 默认是 lossless WebP)
+# format 可选值: "webp", "jpeg", "mozjpeg", "avif"
+[image_output]
+format = "webp"
+#quality = 75 # 对于 jpeg/mozjpeg/avif，这是质量参数 (0-100)
+
+# 守护进程配置 (仅限 Unix)
+[daemon]
+# 每隔多少秒检查一次更新
+interval_seconds = 86400 # 1天
