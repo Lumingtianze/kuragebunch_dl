@@ -156,12 +156,6 @@ struct EpisodeInfo {
     readable_product_id: String,
     title: String,
     viewer_uri: String,
-    status: EpisodeStatus,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct EpisodeStatus {
-    label: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -183,7 +177,12 @@ struct EpisodeJsonData {
 #[serde(rename_all = "camelCase")]
 struct ReadableProduct {
     series: SeriesMeta,
-    page_structure: PageStructure,
+    // 未购买章节此字段为 null，必须使用 Option
+    page_structure: Option<PageStructure>,
+    #[serde(default)]
+    has_purchased: bool,
+    #[serde(default)]
+    is_public: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -318,12 +317,30 @@ async fn download_episode(storage: &StorageClient, http_client: &reqwest::Client
     let json_str = script_tag.attr("data-value").context("'data-value' 属性不存在")?;
     let episode_data: EpisodeJsonData = serde_json::from_str(json_str)?;
     
-    let page_structure = episode_data.readable_product.page_structure;
+    // 检查是否有页面数据
+    // 如果 page_structure 为 None，说明未购买或未登录。此时必须返回 Ok(false)。
+    // 返回 Ok(false) 告诉调用者：没有发生网络错误，但也没有下载成功，请不要将其标记为完成。
+    let page_structure = match episode_data.readable_product.page_structure {
+        Some(ps) => ps,
+        None => {
+            let reason = if !episode_data.readable_product.has_purchased && !episode_data.readable_product.is_public {
+                "权限不足(未购买且非公开)"
+            } else {
+                "无页面数据"
+            };
+            println!("[跳过] '{}' 无法下载: {}。", episode_title, reason);
+            return Ok(false); // 返回 false，避免被写入日志
+        }
+    };
+
     let pages_to_download: Vec<Page> = page_structure.pages.into_iter().filter(|p| p.page_type == "main" && p.src.is_some()).collect();
     
     let expected_page_count = pages_to_download.len();
     println!("[处理] '{}' 共有 {} 页。", episode_title, expected_page_count);
-    if expected_page_count == 0 { return Ok(true); }
+    if expected_page_count == 0 { 
+        // 页面数为0的情况（虽然已获得结构），视为不需要下载或异常，返回 false 以防万一
+        return Ok(false); 
+    }
 
     let successful_saves = Arc::new(Mutex::new(0));
     let errors = Arc::new(Mutex::new(Vec::new()));
@@ -369,14 +386,14 @@ async fn download_episode(storage: &StorageClient, http_client: &reqwest::Client
     if !final_errors.is_empty() { 
         eprintln!("[验证失败] '{}' 下载出现错误 (成功 {} / 预期 {})。", episode_title, final_count, expected_page_count); 
         final_errors.iter().for_each(|e| eprintln!("  - 失败原因: {}", e)); 
-        return Ok(false); 
+        return Ok(false); // 下载不完整，返回 false
     }
     if final_count != expected_page_count { 
         eprintln!("[验证失败] '{}' 下载未完成 (成功 {} / 预期 {})。", episode_title, final_count, expected_page_count); 
-        return Ok(false); 
+        return Ok(false); // 数量不匹配，返回 false
     }
     println!("[验证成功] '{}' 所有页码已下载。", episode_title);
-    Ok(true)
+    Ok(true) // 只有完全成功才返回 true
 }
 
 // --- 主任务循环 ---
@@ -452,7 +469,8 @@ async fn run_tasks(config: &Config, http_client: &reqwest::Client, storage: &Arc
                 
                 let episodes = match http_client.get(&api_url).send().await {
                     Ok(res) => match res.json::<Vec<EpisodeInfo>>().await {
-                        Ok(eps) => eps.into_iter().filter(|ep| ep.status.label == "is_free").collect::<Vec<_>>(),
+                        // 获取所有章节
+                        Ok(eps) => eps, 
                         Err(e) => {
                             eprintln!("[错误] 解析系列ID '{}' 的章节JSON失败: {}", series_info.id, e);
                             continue;
@@ -465,10 +483,10 @@ async fn run_tasks(config: &Config, http_client: &reqwest::Client, storage: &Arc
                 };
 
                 if episodes.is_empty() {
-                    println!("[信息] 系列 '{}' (ID: {}) 未找到可下载的免费章节。", series_info.title, series_info.id);
+                    println!("[信息] 系列 '{}' (ID: {}) 未找到任何章节。", series_info.title, series_info.id);
                     continue;
                 }
-                println!("[信息] 找到 {} 个免费章节。", episodes.len());
+                println!("[信息] 找到 {} 个章节，开始检查下载权限...", episodes.len());
                 
                 let info_key = manga_key.join("info.json");
                 if storage.read_to_vec(&info_key).await?.is_none() {
@@ -516,11 +534,14 @@ async fn run_tasks(config: &Config, http_client: &reqwest::Client, storage: &Arc
                         
                         match download_episode(&storage, &http_client, Arc::clone(&download_semaphore), &episode.viewer_uri, &episode.title, &episode_base_key, image_output_config).await {
                             Ok(true) => { 
+                                // 只有当 download_episode 明确返回 Ok(true) 时，才视为下载成功并记录日志
                                 let mut lg = log.lock().await; 
                                 lg.chapters.insert(episode_id_str, ChapterLog { title: episode.title.clone(), completed: true }); 
                             }
+                            Ok(false) => {
+                                // 返回 false 表示本次未下载（权限不足或校验失败），不记录日志，以便后续重试
+                            }
                             Err(e) => eprintln!("[错误] 处理 '{}' 失败: {}", episode.title, e),
-                            _ => {}
                         }
                     }
                 }).collect();
